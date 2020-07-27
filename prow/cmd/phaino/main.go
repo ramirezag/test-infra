@@ -36,12 +36,13 @@ import (
 )
 
 type options struct {
-	keepGoing    bool
-	printCmd     bool
-	priv         bool
-	timeout      time.Duration
-	totalTimeout time.Duration
-	grace        time.Duration
+	skipAskInputIfRepoFound bool
+	keepGoing               bool
+	printCmd                bool
+	priv                    bool
+	timeout                 time.Duration
+	totalTimeout            time.Duration
+	grace                   time.Duration
 
 	jobs []string
 }
@@ -49,6 +50,7 @@ type options struct {
 func gatherOptions() options {
 	var o options
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	fs.BoolVar(&o.skipAskInputIfRepoFound, "skip-ask-input-if-repo-found", false, "Continue running jobs after one fails if set")
 	fs.BoolVar(&o.keepGoing, "keep-going", false, "Continue running jobs after one fails if set")
 	fs.BoolVar(&o.printCmd, "print", false, "Just print the command it would run")
 	fs.BoolVar(&o.priv, "privileged", false, "Allow privileged local runs")
@@ -127,15 +129,7 @@ func readPJs(jobs []string) (<-chan prowapi.ProwJob, <-chan error) {
 			return
 		}
 		for _, j := range jobs {
-			var pj *prowapi.ProwJob
-			var err error
-			if strings.HasPrefix(j, "https:") || strings.HasPrefix(j, "http:") {
-				logrus.WithField("url", j).Info("Downloading...")
-				pj, err = readHTTP(j)
-			} else {
-				logrus.WithField("path", j).Info("Reading...")
-				pj, err = readFile(j)
-			}
+			pj, err := readSinglePj(j)
 			if err != nil {
 				errch <- fmt.Errorf("%q: %v", j, err)
 				return
@@ -147,6 +141,22 @@ func readPJs(jobs []string) (<-chan prowapi.ProwJob, <-chan error) {
 	return ch, errch
 }
 
+func readSinglePj(j string) (*prowapi.ProwJob, error) {
+	var pj *prowapi.ProwJob
+	var err error
+	if strings.HasPrefix(j, "https:") || strings.HasPrefix(j, "http:") {
+		logrus.WithField("url", j).Info("Downloading...")
+		pj, err = readHTTP(j)
+	} else {
+		logrus.WithField("path", j).Info("Reading...")
+		pj, err = readFile(j)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%q: %v", j, err)
+	}
+	return pj, nil
+}
+
 func jobName(pj prowapi.ProwJob) string {
 	if pj.Spec.Job != "" {
 		return pj.Spec.Job
@@ -156,6 +166,15 @@ func jobName(pj prowapi.ProwJob) string {
 
 func main() {
 	opt := gatherOptions()
+	if len(opt.jobs) == 1 {
+		err := processSingleJob(context.Background(), opt, opt.jobs[0])
+		if err != nil {
+			logrus.Error(err)
+			return
+		}
+		logrus.Info("SUCCESS")
+		return
+	}
 
 	pjs, errs := readPJs(opt.jobs)
 
@@ -181,7 +200,7 @@ func processJobs(ctx context.Context, opt options, pjs <-chan prowapi.ProwJob, e
 		case pj := <-pjs:
 			start := time.Now()
 			log := logrus.WithField("job", jobName(pj))
-			err := convertJob(ctx, log, pj, opt.priv, opt.printCmd, opt.timeout, opt.grace)
+			err := convertJob(ctx, log, pj, opt.priv, opt.printCmd, opt.timeout, opt.grace, opt.skipAskInputIfRepoFound)
 			log = log.WithField("duration", time.Now().Sub(start))
 			if err != nil {
 				log.WithError(err).Error("FAIL")
@@ -198,4 +217,21 @@ func processJobs(ctx context.Context, opt options, pjs <-chan prowapi.ProwJob, e
 			return fmt.Errorf("cancel: %v", ctx.Err())
 		}
 	}
+}
+
+func processSingleJob(ctx context.Context, opt options, job string) error {
+	pj, err := readSinglePj(job)
+	if err != nil {
+		return fmt.Errorf("%q: %v", job, err)
+	}
+	start := time.Now()
+	log := logrus.WithField("job", jobName(*pj))
+	err = convertJob(ctx, log, *pj, opt.priv, opt.printCmd, opt.timeout, opt.grace, opt.skipAskInputIfRepoFound)
+	log = log.WithField("duration", time.Now().Sub(start))
+	if err != nil {
+		log.WithError(err).Error("FAIL")
+		return err
+	}
+	log.Info("PASS")
+	return nil
 }

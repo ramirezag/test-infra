@@ -79,7 +79,7 @@ func pathAlias(r prowapi.Refs) string {
 	return r.PathAlias
 }
 
-func readRepo(ctx context.Context, path string) (string, error) {
+func readRepo(ctx context.Context, path string, skipAskInputIfRepoFound bool) (string, error) {
 	wd, err := workingDir()
 	if err != nil {
 		return "", fmt.Errorf("workingDir: %v", err)
@@ -91,6 +91,9 @@ func readRepo(ctx context.Context, path string) (string, error) {
 	fmt.Fprintf(os.Stderr, "local /path/to/%s", path)
 	if def != "" {
 		fmt.Fprintf(os.Stderr, " [%s]", def)
+		if skipAskInputIfRepoFound {
+			return realPath(def)
+		}
 	}
 	fmt.Fprint(os.Stderr, ": ")
 	out, err := scanln(ctx)
@@ -185,7 +188,7 @@ func checkPrivilege(ctx context.Context, cont coreapi.Container, allow bool) (bo
 	return false, nil
 }
 
-func convertToLocal(ctx context.Context, log *logrus.Entry, pj prowapi.ProwJob, name string, allowPrivilege bool) ([]string, error) {
+func convertToLocal(ctx context.Context, log *logrus.Entry, pj prowapi.ProwJob, name string, allowPrivilege, skipAskInputIfRepoFound bool) ([]string, error) {
 	log.Info("Converting job into docker run command...")
 	var localArgs []string
 	localArgs = append(localArgs, baseArgs...)
@@ -254,7 +257,7 @@ func convertToLocal(ctx context.Context, log *logrus.Entry, pj prowapi.ProwJob, 
 		refs = append(refs, pj.Spec.ExtraRefs...)
 		for _, ref := range refs {
 			path := pathAlias(ref)
-			repo, err := readRepo(ctx, path)
+			repo, err := readRepo(ctx, path, skipAskInputIfRepoFound)
 			if err != nil {
 				return nil, fmt.Errorf("bad repo(%s): %v", path, err)
 			}
@@ -323,9 +326,9 @@ func containerID() string {
 	return fmt.Sprintf("phaino-%d-%d", os.Getpid(), nameId)
 }
 
-func convertJob(ctx context.Context, log *logrus.Entry, pj prowapi.ProwJob, priv, onlyPrint bool, timeout, grace time.Duration) error {
+func convertJob(ctx context.Context, log *logrus.Entry, pj prowapi.ProwJob, priv, onlyPrint bool, timeout, grace time.Duration, skipAskInputIfRepoFound bool) error {
 	cid := containerID()
-	args, err := convertToLocal(ctx, log, pj, cid, priv)
+	args, err := convertToLocal(ctx, log, pj, cid, priv, skipAskInputIfRepoFound)
 	if err != nil {
 		return fmt.Errorf("convert: %v", err)
 	}
